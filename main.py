@@ -5,17 +5,18 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 
-os.environ.setdefault("DISABLE_MODEL_SOURCE_CHECK", "True")
+from pdf_table_extractor.paths import setup_offline_env
+
+setup_offline_env()
 
 from pdf_table_extractor.database import TableDatabase
 from pdf_table_extractor.extractor import PdfTableExtractor
 
 
 def run_cli(args: argparse.Namespace) -> int:
-    extractor = PdfTableExtractor(dpi=args.dpi, use_mobile_ocr=not args.server_ocr)
+    extractor = PdfTableExtractor(dpi=args.dpi)
 
     def progress(msg: str, ratio: float) -> None:
         pct = int(ratio * 100)
@@ -54,7 +55,6 @@ def main() -> int:
     parser.add_argument("--page-from", type=int, default=None)
     parser.add_argument("--page-to", type=int, default=None)
     parser.add_argument("--dpi", type=int, default=150)
-    parser.add_argument("--server-ocr", action="store_true", help="使用更准但更慢的 server OCR 模型")
     args = parser.parse_args()
 
     if args.cli:

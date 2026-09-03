@@ -1,0 +1,27 @@
+扫描件 PDF 表格提取工具（Python 离线安装版 / RapidOCR）
+
+适用：客户已装 Python，但无法访问外网。
+若不想处理 Python 版本，请改用 PdfTableExtractor_green.zip（双击 run.bat 即可）。
+
+━━━━━━━━━━━━━━━━━━━━
+一、环境要求
+━━━━━━━━━━━━━━━━━━━━
+- Windows 10/11 64 位
+- Python 版本需与 PYTHON_VERSION.txt 一致
+- 建议内存 4GB 及以上
+
+━━━━━━━━━━━━━━━━━━━━
+二、安装（只需一次）
+━━━━━━━━━━━━━━━━━━━━
+1. 解压本文件夹
+2. 双击 install.bat
+3. 等待完成
+
+━━━━━━━━━━━━━━━━━━━━
+三、使用
+━━━━━━━━━━━━━━━━━━━━
+双击 run.bat，或：
+  python main.py
+
+- 无需联网（models 目录已含 ONNX 模型）
+- 结果：PDF同目录\文件名_tables.db

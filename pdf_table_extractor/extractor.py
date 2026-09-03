@@ -1,8 +1,7 @@
-"""从扫描件 PDF 中提取表格。"""
+"""从扫描件 PDF 中提取表格（RapidOCR + ONNXRuntime）。"""
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,9 +11,8 @@ import cv2
 import numpy as np
 import pymupdf
 
-os.environ.setdefault("DISABLE_MODEL_SOURCE_CHECK", "True")
-
 from .ocr_patch import apply_img2table_patch
+from .paths import rapidocr_params
 
 ProgressCallback = Callable[[str, float], None]
 
@@ -43,31 +41,30 @@ class PdfTableExtractor:
         min_rows: int = 4,
         min_cols: int = 4,
         max_page_area_ratio: float = 0.72,
-        use_mobile_ocr: bool = True,
     ):
         self.dpi = dpi
         self.min_rows = min_rows
         self.min_cols = min_cols
         self.max_page_area_ratio = max_page_area_ratio
-        self.use_mobile_ocr = use_mobile_ocr
         self._ocr = None
+        self._title_ocr = None
         apply_img2table_patch()
 
     def _ensure_ocr(self):
         if self._ocr is not None:
             return self._ocr
-        from img2table.ocr import PaddleOCR as Img2TablePaddle
+        from img2table.ocr import RapidOCR as Img2TableRapid
 
-        kw = {
-            "use_doc_orientation_classify": False,
-            "use_doc_unwarping": False,
-            "use_textline_orientation": False,
-        }
-        if self.use_mobile_ocr:
-            kw["text_detection_model_name"] = "PP-OCRv5_mobile_det"
-            kw["text_recognition_model_name"] = "PP-OCRv5_mobile_rec"
-        self._ocr = Img2TablePaddle(lang="ch", kw=kw)
+        self._ocr = Img2TableRapid(params=rapidocr_params())
         return self._ocr
+
+    def _ensure_title_ocr(self):
+        if self._title_ocr is not None:
+            return self._title_ocr
+        from rapidocr import RapidOCR
+
+        self._title_ocr = RapidOCR(params=rapidocr_params())
+        return self._title_ocr
 
     def render_page(self, page: pymupdf.Page) -> np.ndarray:
         zoom = self.dpi / 72.0
@@ -99,7 +96,6 @@ class PdfTableExtractor:
         area = (bbox.x2 - bbox.x1) * (bbox.y2 - bbox.y1)
         if area / float(page_h * page_w) > self.max_page_area_ratio:
             return False
-        # 图纸标题栏：贴在页面底部的扁长表格
         if bbox.y1 > page_h * 0.82 and (bbox.y2 - bbox.y1) < page_h * 0.15:
             return False
         return True
@@ -139,12 +135,10 @@ class PdfTableExtractor:
         return self._dedupe_merged_noise(matrix)
 
     def _dedupe_merged_noise(self, matrix: list[list[str]]) -> list[list[str]]:
-        """去掉整行被重复铺满的噪声行（如页码行）。"""
         cleaned = []
         for row in matrix:
             nonempty = [c for c in row if c]
             if len(nonempty) >= 3 and len(set(nonempty)) == 1:
-                # 同一内容铺满整行，通常是误检
                 sample = nonempty[0]
                 if "页" in sample or len(sample) < 4:
                     continue
@@ -158,7 +152,6 @@ class PdfTableExtractor:
         for row in matrix[:4]:
             joined = "".join(row)
             if "表" in joined:
-                # 取行内最长非空单元格
                 cells = sorted((c for c in row if c), key=len, reverse=True)
                 if cells:
                     return cells[0].replace("\n", "")
@@ -169,7 +162,6 @@ class PdfTableExtractor:
         return "未命名表格"
 
     def _title_candidates_above(self, bgr: np.ndarray, bbox) -> list[str]:
-        """在表格上方窄带做轻量 OCR，用于取表名。"""
         h, w = bgr.shape[:2]
         y1 = max(0, int(bbox.y1) - max(60, int(h * 0.08)))
         y2 = max(y1 + 10, int(bbox.y1) + 5)
@@ -179,27 +171,10 @@ class PdfTableExtractor:
         if band.size == 0:
             return []
         try:
-            from paddleocr import PaddleOCR
-
-            if not hasattr(self, "_title_ocr") or self._title_ocr is None:
-                kw = dict(
-                    use_doc_orientation_classify=False,
-                    use_doc_unwarping=False,
-                    use_textline_orientation=False,
-                )
-                if self.use_mobile_ocr:
-                    kw["text_detection_model_name"] = "PP-OCRv5_mobile_det"
-                    kw["text_recognition_model_name"] = "PP-OCRv5_mobile_rec"
-                self._title_ocr = PaddleOCR(**kw)
-            result = self._title_ocr.predict(band)
-            if not result:
-                return []
-            data = result[0]
-            j = data.json if hasattr(data, "json") else data
-            if isinstance(j, dict) and "res" in j:
-                j = j["res"]
-            texts = j.get("rec_texts") or []
-            return [t for t in texts if t and t.strip()]
+            engine = self._ensure_title_ocr()
+            result = engine(band)
+            texts = getattr(result, "txts", None) or ()
+            return [t for t in texts if t and str(t).strip()]
         except Exception:
             return []
 
@@ -215,7 +190,7 @@ class PdfTableExtractor:
         ocr = self._ensure_ocr()
         extracted: list[ExtractedTable] = []
         for idx, stub in enumerate(data_tables):
-            crop, ox, oy = self._crop_with_title(bgr, stub.bbox)
+            crop, _ox, _oy = self._crop_with_title(bgr, stub.bbox)
             doc = Img2TableImage(src=self._to_png_bytes(crop))
             tables = doc.extract_tables(
                 ocr=ocr,
@@ -223,11 +198,9 @@ class PdfTableExtractor:
                 borderless_tables=False,
                 min_confidence=40,
             )
-            # 在裁剪图里再筛一次，取最大数据表
             page_h, page_w = crop.shape[:2]
             valid = [t for t in tables if self._is_data_table(t, page_h, page_w)]
             if not valid and tables:
-                # 回退：选单元格最多的
                 valid = [max(tables, key=lambda t: (t.df.shape[0] * t.df.shape[1]) if t.df is not None else 0)]
             if not valid:
                 continue
@@ -275,7 +248,6 @@ class PdfTableExtractor:
                     progress(f"扫描第 {page_no}/{end} 页…", (page_no - start) / max(1, end - start + 1))
                 page = doc[page_no - 1]
                 bgr = self.render_page(page)
-                # 快速结构预检
                 h, w = bgr.shape[:2]
                 stubs = [t for t in self._structure_tables(bgr) if self._is_data_table(t, h, w)]
                 if not stubs:

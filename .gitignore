@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# Packaging / build outputs
+build/
+dist/
+release/
+packaging/cache/
+*.spec.bak
+wheels/
+
+# Local OCR models & caches
+models/
+.paddlex/
+.paddleocr/
+
+# Runtime data / previews
+*.db
+*.sqlite
+*.sqlite3
+_preview/
+_preview_*.db
+
+# Sample / local documents (keep repo source-only)
+*.pdf
+
+# IDE / OS
+.idea/
+.vscode/
+*.code-workspace
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs / temp
+*.log
+*.tmp
+*.temp
+.cache/

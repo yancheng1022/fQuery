@@ -1,0 +1,37 @@
+扫描件 PDF 表格提取工具（Python 离线安装版）
+
+适用：客户电脑已安装 Python，但无法访问外网。
+
+━━━━━━━━━━━━━━━━━━━━
+一、环境要求
+━━━━━━━━━━━━━━━━━━━━
+- Windows 10/11 64 位
+- Python 版本需与打包时一致（见 PYTHON_VERSION.txt）
+- 建议内存 8GB 及以上
+
+━━━━━━━━━━━━━━━━━━━━
+二、安装（只需一次）
+━━━━━━━━━━━━━━━━━━━━
+1. 解压本文件夹到任意路径（路径不要过深、不要含特殊字符）
+2. 双击「安装依赖.bat」
+   或在本目录打开命令行执行：
+   python -m pip install --no-index --find-links=wheels -r requirements.txt
+3. 等待安装完成。若报错，多半是 Python 版本与 PYTHON_VERSION.txt 不一致
+
+━━━━━━━━━━━━━━━━━━━━
+三、使用
+━━━━━━━━━━━━━━━━━━━━
+双击「启动.bat」，或执行：
+  python main.py
+
+- 无需联网（OCR 模型已放在 .paddlex\official_models）
+- 提取结果自动保存为：PDF同目录\文件名_tables.db
+
+━━━━━━━━━━━━━━━━━━━━
+四、常见问题
+━━━━━━━━━━━━━━━━━━━━
+Q: pip 提示找不到匹配的 wheel？
+A: 请安装与 PYTHON_VERSION.txt 相同主版本的 64 位 Python 后再装依赖。
+
+Q: 启动后仍尝试联网？
+A: 确认 .paddlex\official_models 下有 PP-OCRv5_mobile_det 与 PP-OCRv5_mobile_rec。
