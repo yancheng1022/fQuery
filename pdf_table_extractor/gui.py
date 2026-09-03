@@ -9,6 +9,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from .database import TableDatabase
 from .extractor import PdfTableExtractor
+from .history import history_label, load_history, remove_history, upsert_history
 
 
 def _display_width(text: str) -> int:
@@ -43,12 +44,14 @@ class App(tk.Tk):
         self._cancel = False
         self._db_path: str | None = None
         self._last_db: TableDatabase | None = None
+        self._history_items: list[dict] = []
         self._current_matrix: list[list[str]] = []
         self._current_headers: list[str] = []
         self._displayed_rows: list[list[str]] = []
         self._header_row_used = False
 
         self._build_ui()
+        self._refresh_history(select_first=True)
 
     @staticmethod
     def _default_db_path(pdf_path: str | Path) -> str:
@@ -97,8 +100,25 @@ class App(tk.Tk):
         mid.add(left, weight=1)
         mid.add(right, weight=3)
 
+        hist_fr = ttk.Frame(left)
+        hist_fr.pack(fill=tk.X)
+        ttk.Label(hist_fr, text="历史 PDF").pack(side=tk.LEFT)
+        self.history_var = tk.StringVar()
+        self.history_combo = ttk.Combobox(
+            hist_fr,
+            textvariable=self.history_var,
+            state="readonly",
+            width=36,
+        )
+        self.history_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+        self.history_combo.bind("<<ComboboxSelected>>", self._on_select_history)
+        ttk.Button(hist_fr, text="刷新", width=4, command=lambda: self._refresh_history(select_current=True)).pack(
+            side=tk.LEFT
+        )
+        ttk.Button(hist_fr, text="删除", width=4, command=self._delete_history).pack(side=tk.LEFT, padx=(4, 0))
+
         search_fr = ttk.Frame(left)
-        search_fr.pack(fill=tk.X)
+        search_fr.pack(fill=tk.X, pady=(6, 0))
         self.search_var = tk.StringVar()
         ttk.Entry(search_fr, textvariable=self.search_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(search_fr, text="搜索", command=self._search).pack(side=tk.LEFT, padx=4)
@@ -123,14 +143,14 @@ class App(tk.Tk):
         ttk.Label(content_search_fr, text="表内搜索").pack(side=tk.LEFT)
         content_entry = ttk.Entry(content_search_fr, textvariable=self.content_search_var)
         content_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
-        content_entry.bind("<Return>", lambda _e: self._filter_preview())
-        ttk.Button(content_search_fr, text="筛选", command=self._filter_preview).pack(side=tk.LEFT)
+        content_entry.bind("<Return>", lambda _e: self._highlight_preview())
+        ttk.Button(content_search_fr, text="高亮", command=self._highlight_preview).pack(side=tk.LEFT)
         ttk.Button(content_search_fr, text="清除", command=self._clear_content_search).pack(side=tk.LEFT, padx=(4, 0))
 
         preview_wrap = ttk.Frame(right)
         preview_wrap.pack(fill=tk.BOTH, expand=True)
         self.preview = ttk.Treeview(preview_wrap, show="headings", selectmode="browse")
-        self.preview.tag_configure("match", background="#FFF3BF")
+        self.preview.tag_configure("hit", background="#FFE08A")
         self.preview.tag_configure("odd", background="#FAFAFA")
         ysb = ttk.Scrollbar(preview_wrap, orient=tk.VERTICAL, command=self.preview.yview)
         xsb = ttk.Scrollbar(preview_wrap, orient=tk.HORIZONTAL, command=self.preview.xview)
@@ -147,14 +167,136 @@ class App(tk.Tk):
             anchor=tk.W, fill=tk.X, pady=(6, 0)
         )
 
+    def _refresh_history(self, select_first: bool = False, select_current: bool = False, select_pdf: str | None = None) -> None:
+        self._history_items = load_history()
+        labels = [history_label(item) for item in self._history_items]
+        self.history_combo["values"] = labels
+
+        if not self._history_items:
+            self.history_var.set("")
+            self.status_var.set("暂无历史记录，请先提取 PDF")
+            return
+
+        target_idx = None
+        if select_pdf:
+            want = str(Path(select_pdf).resolve())
+            for i, item in enumerate(self._history_items):
+                if str(Path(item["pdf_path"]).resolve()) == want:
+                    target_idx = i
+                    break
+        elif select_current and self.pdf_var.get().strip():
+            want = str(Path(self.pdf_var.get().strip()).resolve())
+            for i, item in enumerate(self._history_items):
+                if str(Path(item["pdf_path"]).resolve()) == want:
+                    target_idx = i
+                    break
+        elif select_first:
+            target_idx = 0
+
+        if target_idx is None:
+            # 保持当前下拉文本；若无效则选第一条
+            if self.history_var.get() not in labels:
+                target_idx = 0
+            else:
+                return
+
+        self.history_combo.current(target_idx)
+        self._on_select_history()
+
+    def _delete_history(self) -> None:
+        idx = self.history_combo.current()
+        if idx < 0 or idx >= len(self._history_items):
+            messagebox.showinfo("提示", "请先选择要删除的历史 PDF")
+            return
+        item = self._history_items[idx]
+        name = item.get("filename") or item.get("pdf_path")
+        pdf = item["pdf_path"]
+        db_path = item["db_path"]
+        if not messagebox.askyesno(
+            "确认删除",
+            f"删除该 PDF 的历史记录，并清除其已提取的全部表格？\n\n{name}\n\n此操作不可恢复。",
+        ):
+            return
+
+        deleted_tables = 0
+        # 关闭当前库连接，避免 Windows 下文件占用
+        if self._last_db and self._db_path and Path(self._db_path).resolve() == Path(db_path).resolve():
+            try:
+                self._last_db.close()
+            except Exception:
+                pass
+            self._last_db = None
+
+        if Path(db_path).exists():
+            try:
+                db_obj = TableDatabase(db_path)
+                deleted_tables = db_obj.delete_document(pdf)
+                empty = db_obj.document_count() == 0
+                db_obj.close()
+                if empty:
+                    try:
+                        Path(db_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            except Exception as exc:
+                messagebox.showerror("删除失败", f"清除表格数据时出错：\n{exc}")
+                return
+
+        remove_history(pdf)
+
+        for child in self.tree.get_children():
+            self.tree.delete(child)
+        children = self.preview.get_children()
+        if children:
+            self.preview.delete(*children)
+        self.preview_title_var.set("表格内容预览")
+        self.cell_detail_var.set("")
+        self._current_matrix = []
+        self._current_headers = []
+        self._displayed_rows = []
+        if self.pdf_var.get().strip() and Path(self.pdf_var.get().strip()).resolve() == Path(pdf).resolve():
+            self.pdf_var.set("")
+            self._db_path = None
+        self._refresh_history(select_first=True)
+        self.status_var.set(f"已删除：{name}（清除 {deleted_tables} 张表）")
+
+    def _on_select_history(self, _event=None) -> None:
+        idx = self.history_combo.current()
+        if idx < 0 or idx >= len(self._history_items):
+            return
+        item = self._history_items[idx]
+        pdf = item["pdf_path"]
+        db = item["db_path"]
+        if not Path(db).exists():
+            messagebox.showwarning("提示", f"数据库不存在，已从历史中跳过：\n{db}")
+            self._refresh_history(select_first=True)
+            return
+        self.pdf_var.set(pdf)
+        self._db_path = db
+        self._load_db_preview(db, document_pdf=pdf)
+        self.status_var.set(f"已加载历史：{item.get('filename')}（{item.get('table_count', 0)} 张表）")
+
     def _pick_pdf(self) -> None:
         path = filedialog.askopenfilename(
             title="选择 PDF",
             filetypes=[("PDF 文件", "*.pdf"), ("所有文件", "*.*")],
         )
-        if path:
-            self.pdf_var.set(path)
-            self._db_path = self._default_db_path(path)
+        if not path:
+            return
+        self.pdf_var.set(path)
+        db = self._default_db_path(path)
+        self._db_path = db
+        if Path(db).exists():
+            try:
+                tmp = TableDatabase(db)
+                table_count = tmp.count_summary().get("tables", 0)
+                tmp.close()
+            except Exception:
+                table_count = 0
+            upsert_history(path, db, table_count=table_count)
+            self._refresh_history(select_pdf=path)
+        else:
+            self.status_var.set("已选择 PDF，点击「开始提取」")
 
     def _parse_pages(self) -> tuple[int | None, int | None]:
         pf = self.page_from_var.get().strip()
@@ -210,16 +352,19 @@ class App(tk.Tk):
                     )
                 summary = db_obj.count_summary()
                 db_obj.close()
+                table_count = len(tables)
                 self.after(
                     0,
                     lambda: self._on_done(
                         True,
-                        f"完成：提取 {len(tables)} 张表，库内共 {summary['tables']} 张",
+                        f"完成：提取 {table_count} 张表，库内共 {summary['tables']} 张",
                         db,
+                        pdf,
+                        table_count,
                     ),
                 )
             except Exception as exc:
-                self.after(0, lambda: self._on_done(False, str(exc), db))
+                self.after(0, lambda: self._on_done(False, str(exc), db, pdf, 0))
 
         self._worker = threading.Thread(target=worker, daemon=True)
         self._worker.start()
@@ -228,17 +373,21 @@ class App(tk.Tk):
         self._cancel = True
         self.status_var.set("正在取消…")
 
-    def _on_done(self, ok: bool, msg: str, db_path: str) -> None:
+    def _on_done(self, ok: bool, msg: str, db_path: str, pdf_path: str = "", table_count: int = 0) -> None:
         self.run_btn.configure(state=tk.NORMAL)
         self.cancel_btn.configure(state=tk.DISABLED)
         self.status_var.set(msg)
         if ok:
+            if pdf_path:
+                upsert_history(pdf_path, db_path, table_count=table_count)
+                self._refresh_history(select_pdf=pdf_path)
+            else:
+                self._load_db_preview(db_path)
             messagebox.showinfo("完成", msg)
-            self._load_db_preview(db_path)
         else:
             messagebox.showerror("失败", msg)
 
-    def _load_db_preview(self, db_path: str) -> None:
+    def _load_db_preview(self, db_path: str, document_pdf: str | None = None) -> None:
         if self._last_db:
             try:
                 self._last_db.close()
@@ -248,14 +397,32 @@ class App(tk.Tk):
         self._db_path = db_path
         for item in self.tree.get_children():
             self.tree.delete(item)
-        for row in self._last_db.list_tables():
+
+        document_id = None
+        if document_pdf:
+            document_id = self._last_db.find_document_id(document_pdf)
+
+        for row in self._last_db.list_tables(document_id=document_id):
             self.tree.insert(
                 "",
                 tk.END,
                 iid=str(row["id"]),
                 values=(row["id"], row["page_number"], row["table_name"], f"{row['row_count']}x{row['col_count']}"),
             )
-        self.status_var.set(f"已加载 {self._last_db.count_summary()}")
+        summary = self._last_db.count_summary()
+        shown = len(self.tree.get_children())
+        self.status_var.set(f"当前 PDF 表格 {shown} 张（库内共 {summary['tables']} 张）")
+
+        # 清空右侧预览
+        self.preview_title_var.set("表格内容预览")
+        self.content_search_var.set("")
+        self.cell_detail_var.set("")
+        self._current_matrix = []
+        self._current_headers = []
+        self._displayed_rows = []
+        children = self.preview.get_children()
+        if children:
+            self.preview.delete(*children)
 
     def _on_select_table(self, _event=None) -> None:
         if not self._last_db:
@@ -308,44 +475,75 @@ class App(tk.Tk):
         headers = self._current_headers
         col_ids = [f"c{i}" for i in range(len(headers))]
         self.preview["columns"] = col_ids
+        # 始终保留原始行，详情栏/悬停用未加标记的文本
         self._displayed_rows = rows
 
-        # 按内容估算列宽，限制在合理范围，尽量一屏看完
+        kw = highlight.strip()
+        kw_lower = kw.lower()
+
         for i, header in enumerate(headers):
             samples = [header] + [r[i] for r in rows if i < len(r)]
             max_w = max((_display_width(s) for s in samples), default=4)
-            px = max(56, min(160, max_w * 7 + 16))
+            # 高亮标记可能略增宽度
+            px = max(56, min(168, max_w * 7 + (28 if kw else 16)))
             short_header = header.replace("\n", " ")
             if _display_width(short_header) > 16:
                 short_header = short_header[:10] + "…"
             self.preview.heading(col_ids[i], text=short_header)
             self.preview.column(col_ids[i], width=px, minwidth=48, stretch=True, anchor=tk.W)
 
-        kw = highlight.strip().lower()
+        hit_cells = 0
+        hit_rows = 0
         for r_i, row in enumerate(rows):
             values = []
-            matched = False
+            row_hit = False
             for i in range(len(headers)):
                 text = row[i] if i < len(row) else ""
-                if kw and kw in text.lower():
-                    matched = True
-                if _display_width(text) > 24:
-                    cut = text
-                    while _display_width(cut) > 22 and len(cut) > 1:
+                display = text
+                if kw_lower and kw_lower in text.lower():
+                    row_hit = True
+                    hit_cells += 1
+                    display = self._mark_highlight(text, kw)
+                if _display_width(display) > 28:
+                    cut = display
+                    while _display_width(cut) > 26 and len(cut) > 1:
                         cut = cut[:-1]
-                    text = cut + "…"
-                values.append(text)
+                    display = cut + "…"
+                values.append(display)
             tags = []
-            if matched:
-                tags.append("match")
+            if row_hit:
+                tags.append("hit")
+                hit_rows += 1
             elif r_i % 2:
                 tags.append("odd")
             self.preview.insert("", tk.END, iid=str(r_i), values=values, tags=tuple(tags))
 
         if kw:
-            self.status_var.set(f"表内匹配 {len(rows)} 行（关键字：{highlight.strip()}）")
+            self.status_var.set(f"已高亮 {hit_cells} 处（{hit_rows} 行），关键字：{kw}")
+            self.cell_detail_var.set(f"高亮关键字「{kw}」：{hit_cells} 处 / 共 {len(rows)} 行")
         elif rows:
             self.status_var.set(f"当前表 {len(rows)} 行 × {len(headers)} 列")
+
+    @staticmethod
+    def _mark_highlight(text: str, keyword: str) -> str:
+        """在匹配处加可见标记（Treeview 无法给单格上色）。"""
+        if not text or not keyword:
+            return text
+        lower = text.lower()
+        key = keyword.lower()
+        parts: list[str] = []
+        start = 0
+        while True:
+            idx = lower.find(key, start)
+            if idx < 0:
+                parts.append(text[start:])
+                break
+            parts.append(text[start:idx])
+            parts.append("【")
+            parts.append(text[idx : idx + len(keyword)])
+            parts.append("】")
+            start = idx + len(keyword)
+        return "".join(parts)
 
     def _row_from_preview_iid(self, row_id: str) -> list[str] | None:
         try:
@@ -356,17 +554,13 @@ class App(tk.Tk):
             return self._displayed_rows[idx]
         return None
 
-    def _filter_preview(self) -> None:
+    def _highlight_preview(self) -> None:
         if not self._current_matrix and not self._current_headers:
             return
-        kw = self.content_search_var.get().strip().lower()
+        kw = self.content_search_var.get().strip()
+        self._render_preview(self._current_matrix, highlight=kw)
         if not kw:
-            self._render_preview(self._current_matrix, highlight="")
             self.cell_detail_var.set("")
-            return
-        filtered = [row for row in self._current_matrix if any(kw in (c or "").lower() for c in row)]
-        self._render_preview(filtered, highlight=kw)
-        self.cell_detail_var.set(f"筛选结果：{len(filtered)} / {len(self._current_matrix)} 行")
 
     def _clear_content_search(self) -> None:
         self.content_search_var.set("")
@@ -410,14 +604,26 @@ class App(tk.Tk):
     def _search(self) -> None:
         if not self._last_db:
             if self._db_path and Path(self._db_path).exists():
-                self._load_db_preview(self._db_path)
+                self._load_db_preview(self._db_path, document_pdf=self.pdf_var.get().strip() or None)
             else:
-                messagebox.showwarning("提示", "请先提取表格")
+                messagebox.showwarning("提示", "请先提取或选择历史 PDF")
                 return
         kw = self.search_var.get().strip()
         for item in self.tree.get_children():
             self.tree.delete(item)
-        rows = self._last_db.search(kw) if kw else self._last_db.list_tables()
+
+        document_id = None
+        pdf = self.pdf_var.get().strip()
+        if pdf:
+            document_id = self._last_db.find_document_id(pdf)
+
+        if kw:
+            rows = self._last_db.search(kw)
+            if document_id is not None:
+                rows = [r for r in rows if self._table_belongs_to_doc(r["id"], document_id)]
+        else:
+            rows = self._last_db.list_tables(document_id=document_id)
+
         for row in rows:
             self.tree.insert(
                 "",
@@ -431,6 +637,14 @@ class App(tk.Tk):
                 ),
             )
         self.status_var.set(f"搜索到 {len(rows)} 条" if kw else f"共 {len(rows)} 张表")
+
+    def _table_belongs_to_doc(self, table_id: int, document_id: int) -> bool:
+        if not self._last_db:
+            return True
+        row = self._last_db.conn.execute(
+            "SELECT document_id FROM tables WHERE id = ?", (table_id,)
+        ).fetchone()
+        return bool(row) and int(row["document_id"]) == document_id
 
 
 def run_app() -> None:

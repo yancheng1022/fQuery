@@ -25,6 +25,7 @@ models/
 .paddleocr/
 
 # Runtime data / previews
+data/
 *.db
 *.sqlite
 *.sqlite3

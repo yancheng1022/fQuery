@@ -94,6 +94,52 @@ class TableDatabase:
         self.conn.commit()
         return doc_id
 
+    def find_document_id(self, filepath: str | Path) -> int | None:
+        path = str(Path(filepath).resolve())
+        row = self.conn.execute(
+            "SELECT id FROM documents WHERE filepath = ?", (path,)
+        ).fetchone()
+        if not row:
+            # 兼容历史相对路径/不同盘符写法：按文件名回退
+            name = Path(filepath).name
+            row = self.conn.execute(
+                "SELECT id FROM documents WHERE filename = ? ORDER BY id DESC LIMIT 1",
+                (name,),
+            ).fetchone()
+        return int(row["id"]) if row else None
+
+    def delete_document(self, filepath: str | Path) -> int:
+        """删除指定 PDF 的全部表格数据，返回删除的表格数。"""
+        doc_id = self.find_document_id(filepath)
+        if doc_id is None:
+            return 0
+        table_ids = [
+            int(r["id"])
+            for r in self.conn.execute(
+                "SELECT id FROM tables WHERE document_id = ?", (doc_id,)
+            ).fetchall()
+        ]
+        deleted = len(table_ids)
+        if table_ids:
+            placeholders = ",".join("?" * len(table_ids))
+            self.conn.execute(
+                f"DELETE FROM cells WHERE table_id IN ({placeholders})",
+                table_ids,
+            )
+            self.conn.execute(
+                f"DELETE FROM tables_fts WHERE rowid IN ({placeholders})",
+                table_ids,
+            )
+            self.conn.execute(
+                "DELETE FROM tables WHERE document_id = ?", (doc_id,)
+            )
+        self.conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+        self.conn.commit()
+        return deleted
+
+    def document_count(self) -> int:
+        return int(self.conn.execute("SELECT COUNT(*) AS c FROM documents").fetchone()["c"])
+
     def save_table(
         self,
         document_id: int,
